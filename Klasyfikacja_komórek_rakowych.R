@@ -1,10 +1,13 @@
-# Breast Cancer Classification - Projekt Pracownia Analizy Danych
+# -------------------------------------------------------------------------------------------------
+# Podział danych na zbiór treningowy i testowy (caret, żeby utrzymać stosunek benign/malignant )
+# -------------------------------------------------------------------------------------------------
+# Klasyfikacja komórek rakowych - Projekt Pracownia Analizy Danych
 
 # ======================
 # W tym projekcie przeanalizowałam zbiór danych BreastCancer z pakietu mlbench, aby sklasyfikować guzy
 # jako łagodne lub złośliwe. Po wstępnym przetworzeniu (obsługa brakujących wartości, konwersja cech 
-# na wartości numeryczne i skalowanie) wytrenowałam i oceniłam cztery modele klasyfikacji: 
-#Regresję Logistyczną,knn, Drzewo Decyzyjne i Sieć Neuronową.
+# na wartości numeryczne i skalowanie) wytrenowałam i oceniłam pięć modeli klasyfikacji: 
+#Regresję Logistyczną,knn, Drzewo Decyzyjne, Sieć Neuronową i Naiwny klasyfikator Bayesa.
 # ======================
 
 # ======================
@@ -29,8 +32,10 @@ library(mlbench)
 library(caret)
 library(class)
 library(ggplot2)
+library(reshape2)
 library(tree)
 library(neuralnet)
+library(e1071)
 
 # --------------------------------------------------
 # Wczytanie i wstępna analiza danych
@@ -92,6 +97,25 @@ par(mfrow = c(1, 1))
 
 # Macierz korelacji - Chcemy wyłączyć bardzo silne korelacje > 0.9 (wyłączając te na przekątnej)
 cor_matrix <- cor(bc[, -which(names(bc) == "Class")])
+
+# Tworzenie heatmapy
+
+# cor_melted staje się uporządkowaną ramką danych z 3 kolumnami:
+# Var1: nazwa zmiennej z wiersza
+# Var2: nazwa zmiennej z kolumny
+# value: korelacja między Var1 i Var2
+# Ten format jest niezbędny do zbudowania mapy cieplnej ggplot2.
+
+cor_melted <- melt(cor_matrix)
+ggplot(data = cor_melted, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0,
+                       limit = c(-1, 1), name = "Korelacja") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Mapa cieplna korelacji", x = "", y = "")
+
 high_corr <- which(abs(cor_matrix) > 0.9 & abs(cor_matrix) < 1, arr.ind = TRUE)
 high_corr_pairs <- unique(t(apply(high_corr, 1, sort)))
 for (pair in 1:nrow(high_corr_pairs)) {
@@ -124,17 +148,22 @@ error_log <- 1 - as.numeric(conf_matrix_log$overall['Accuracy'])
 # --------------------------------------------------
 # Algorytm k-NN
 # --------------------------------------------------
------------------------------------------------------------------------------------------
+train_labels <- train_data$Class
+test_labels <- test_data$Class
+#-----------------------------------------------------------------------------------------
 # W przypadku algorytmów takich jak k-NN ważne jest, aby wszystkie cechy
 #numeryczne były standaryzowane (tj. miały średnią 0 i odchylenie standardowe 1)
-#wyłącznie na podstawie danych treningowych — aby uniknąć przekazania modelowi 
+#yłącznie na podstawie danych treningowych — aby uniknąć przekazania modelowi 
 #informacji z zestawu testowego.
------------------------------------------------------------------------------------------
-# Standaryzacja cech na podstawie danych treningowych
+#-----------------------------------------------------------------------------------------
+
+# Skalowanie danych
 scaler <- preProcess(train_data[, -which(names(train_data) == "Class")], method = c("center", "scale"))
 train_scaled <- predict(scaler, train_data[, -which(names(train_data) == "Class")])
 test_scaled  <- predict(scaler, test_data[, -which(names(test_data) == "Class")])
 
+# train_scaled: dane treningowe (bez kolumny Class), wystandaryzowane
+# test_scaled: dane testowe, wystandaryzowane tą samą metodą
 
 # method = c("center", "scale") (caret)
 # wyśrodkowuje każdą cechę (odejmując średnią)
@@ -143,23 +172,46 @@ test_scaled  <- predict(scaler, test_data[, -which(names(test_data) == "Class")]
 # scaler jest teraz obiektem przechowującym średnią i odchylenie standardowe 
 # dla każdej cechy w danych treningowych.
 
-train_labels <- train_data$Class
-test_labels <- test_data$Class
-
-# Dobór najlepszego k
+# Powtarzanie eksperymentu
+set.seed(123) 
+repeat_times <- 10
 k_values <- 1:20
 accuracies <- numeric(length(k_values))
 
-for (i in k_values) {
-  pred <- knn(train = train_scaled, test = test_scaled, cl = train_labels, k = i)
-  conf <- confusionMatrix(pred, test_labels)
-  accuracies[i] <- conf$overall['Accuracy']
+for (k in k_values) {
+  acc_list <- numeric(repeat_times)
+  for (i in 1:repeat_times) {
+    pred <- knn(train = train_scaled, test = test_scaled, cl = train_labels, k = k)
+    acc_list[i] <- mean(pred == test_labels)
+  }
+  accuracies[k] <- mean(acc_list)
 }
 
-best_k <- which.max(accuracies) # najlepsze k=9
-knn_pred <- knn(train = train_scaled, test = test_scaled, cl = train_labels, k = best_k)
-conf_matrix_knn <- confusionMatrix(knn_pred, test_labels)
+# Wybór najlepszego k
+best_k <- which.max(accuracies)
+
+# Jeśli k jest parzyste, sprawdzamy sąsiadów nieparzystych
+if (best_k %% 2 == 0) {
+  k1 <- best_k + 1
+  k2 <- best_k - 1
+  
+  # Sprawdzamy, czy mieszczą się w zakresie
+  k1_acc <- if (k1 <= max(k_values)) accuracies[k1] else -Inf
+  k2_acc <- if (k2 >= min(k_values)) accuracies[k2] else -Inf
+  
+  best_k <- if (k1_acc > k2_acc) k1 else k2
+}
+
+# Końcowy model i ocena
+final_pred <- knn(train = train_scaled, test = test_scaled, cl = train_labels, k = best_k)
+conf_matrix_knn <- confusionMatrix(final_pred, test_labels)
 error_knn <- 1 - as.numeric(conf_matrix_knn$overall['Accuracy'])
+
+# Wyniki
+cat("Najlepsze k:", best_k, "\n")
+cat("Dokładność:", 1 - error_knn, "\n")
+cat("Błąd klasyfikacji:", error_knn, "\n")
+
 
 # --------------------------------------------------
 # Drzewo decyzyjne
@@ -173,6 +225,7 @@ error_tree <- 1 - as.numeric(conf_matrix_tree$overall['Accuracy'])
 
 # Przycinanie drzewa (sprawdzenie, czy warto)
 set.seed(123)
+# rozmiar i błąd różnych klasyfikacji przy danym rozmiarze (najmniejszy błąd klasyfikacji wychodzi przy nie obciętym drzewie)
 cv_tree <- cv.tree(tree_model, FUN = prune.misclass)
 best_size <- cv_tree$size[which.min(cv_tree$dev)]
 pruned_tree <- prune.misclass(tree_model, best = best_size)
@@ -193,11 +246,13 @@ test_nn$Class <- ifelse(test_data$Class == "malignant", 1, 0)
 
 features_nn <- names(train_nn)[names(train_nn) != "Class"]
 
-#5 neuronów w warstwie ukrytej zapewnia dobre wyniki bez nadmiernego dopasowania.
+# 5 neuronów w warstwie ukrytej zapewnia dobre wyniki bez nadmiernego dopasowania (overfittingu).
 
 set.seed(123)
 nn_model <- neuralnet(Class ~ ., data = train_nn,
                       hidden = 5, linear.output = FALSE, stepmax = 1e6)
+plot(nn_model, rep='best')
+# net.result – surowe wyjścia modelu (prawdopodobieństwa), czyli liczby z przedziału (0,1)
 nn_pred_raw <- compute(nn_model, test_nn[, features_nn])$net.result
 nn_pred_class <- ifelse(nn_pred_raw > 0.5, 1, 0)
 nn_pred_factor <- factor(ifelse(nn_pred_class == 1, "malignant", "benign"),
@@ -208,6 +263,16 @@ conf_matrix_nn <- confusionMatrix(nn_pred_factor, test_class_factor)
 error_nn <- 1 - as.numeric(conf_matrix_nn$overall['Accuracy'])
 
 # --------------------------------------------------
+# Naiwny klasyfikator Bayesa
+# --------------------------------------------------
+model_nb <- naiveBayes(Class ~ ., data = train_data)
+pred_nb <- predict(model_nb, test_data)
+
+conf_matrix_nb <- confusionMatrix(pred_nb, test_data$Class)
+error_nb <- 1 - as.numeric(conf_matrix_nb$overall['Accuracy'])
+
+
+# --------------------------------------------------
 # Porównanie skuteczności modeli
 # --------------------------------------------------
 cat("\n--- Porównanie modeli ---\n")
@@ -215,13 +280,14 @@ cat("Regresja logistyczna - trafność:", round(1 - error_log, 4), "\n")
 cat("k-NN (k=", best_k, ") - trafność:", round(1 - error_knn, 4), "\n")
 cat("Drzewo decyzyjne - trafność:", round(1 - error_tree, 4), "\n")
 cat("Sieć neuronowa - trafność:", round(1 - error_nn, 4), "\n")
+cat("Naiwny klasyfikator Bayesa - trafność:", round(1 - error_nb, 4), "\n")
 
 # --------------------------------------------------
 # Wykres porównujący trafność modeli
 # --------------------------------------------------
 accuracy_df <- data.frame(
-  Model = c("Regresja logistyczna", paste0("k-NN (k=", best_k, ")"), "Drzewo decyzyjne", "Sieć neuronowa"),
-  Trafnosc = c(1 - error_log, 1 - error_knn, 1 - error_tree, 1 - error_nn)
+  Model = c("Regresja logistyczna", paste0("k-NN (k=", best_k, ")"), "Drzewo decyzyjne", "Sieć neuronowa", "Naiwny klasyfikator Bayesa"),
+  Trafnosc = c(1 - error_log, 1 - error_knn, 1 - error_tree, 1 - error_nn, 1 - error_nb)
 )
 
 ggplot(accuracy_df, aes(x = Model, y = Trafnosc)) +
@@ -229,8 +295,7 @@ ggplot(accuracy_df, aes(x = Model, y = Trafnosc)) +
   labs(title = "Porównanie trafności modeli", y = "Trafność (Accuracy)", x = "Model") +
   geom_text(aes(label = round(Trafnosc, 4)), vjust = 1.5, color = "white") +
   theme_minimal()
-
-
+par(mfrow = c(1, 1))
 # Model k-NN osiągnął najwyższą dokładność, choć wszystkie modele wypadły dobrze. 
 
 #  | Model               | Accuracy  | Error Rate |
@@ -239,3 +304,4 @@ ggplot(accuracy_df, aes(x = Model, y = Trafnosc)) +
 #  | k-NN (k = 9)        | 97.8%     | 2.2%       |
 #  | Decision Tree       | 97.0%     | 2.96%      |
 #  | Neural Network      | 97.0%     | 2.96%      |
+#  | Naive Bayes         | 96.3%     | 3.7%       |
